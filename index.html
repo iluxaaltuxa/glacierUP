@@ -135,44 +135,20 @@ const sk=id=>M.get(id);
 function toast(t){const e=$("#toast");e.textContent=t;e.classList.add("s");clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove("s"),1900)}
 document.addEventListener("error",e=>{if(e.target.tagName=="IMG")e.target.style.opacity=0},true);
 
-// ---- price provider: единственное место, где цены приходят снаружи.
-// Источник: Skinport GET /v1/items (без ключа, кэш на их стороне 5 мин, лимит 8 запросов / 5 мин).
-// Порядок: свежий кэш/снапшот -> онлайн -> устаревший кэш/снапшот -> ошибка. Случайных цен нет.
+// ---- price provider: цены приходят только из prices.js (его раз в 6 часов обновляет GitHub Action
+// из Skinport GET /v1/items) и копируются в localStorage как «последние удачные». Случайных цен нет.
 const Prices=(()=>{
-  const CUR="RUB",KEY="glacierup_prices_v1",TTL=6*3600e3;
-  const API="https://api.skinport.com/v1/items?app_id=730&currency="+CUR;
-  const WEAR=/\s*\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)\s*$/;
-  // market_hash_name "AK-47 | Redline (Field-Tested)" -> "AK-47 | Redline": медиана min-цен по износам
-  function fromItems(items){
-    const by={};
-    for(const it of items){
-      const n=it&&it.market_hash_name,p=it&&it.min_price;
-      if(typeof n!=="string"||typeof p!=="number"||!(p>0)||/StatTrak|Souvenir/.test(n))continue;
-      const b=n.replace(WEAR,"");if(b===n)continue;
-      (by[b]=by[b]||[]).push(p);
-    }
-    const m={};
-    for(const k in by){const a=by[k].sort((x,y)=>x-y),h=a.length>>1;m[k]=Math.round((a.length%2?a[h]:(a[h-1]+a[h])/2)*100)/100}
-    return m;
-  }
-  const readCache=()=>{try{const d=JSON.parse(localStorage.getItem(KEY));return d&&d.map&&d.cur===CUR?d:null}catch(e){return null}};
-  const writeCache=d=>{try{localStorage.setItem(KEY,JSON.stringify(d))}catch(e){}};
-  async function live(){
-    const r=await fetch(API); // Accept-Encoding: br браузер ставит сам
-    if(!r.ok)throw new Error("Skinport HTTP "+r.status);
-    const map=fromItems(await r.json());
-    if(Object.keys(map).length<100)throw new Error("Skinport: слишком мало цен в ответе");
-    return {map,ts:Date.now(),cur:CUR};
-  }
+  const CUR="RUB",KEY="glacierup_prices_v1",STALE=48*3600e3;
+  const ok=d=>d&&d.cur===CUR&&d.map&&typeof d.ts==="number"&&Object.keys(d.map).length>=100;
+  const readCache=()=>{try{const d=JSON.parse(localStorage.getItem(KEY));return ok(d)?d:null}catch(e){return null}};
+  const writeCache=d=>{try{localStorage.setItem(KEY,JSON.stringify({map:d.map,ts:d.ts,cur:d.cur}))}catch(e){}};
   async function load(){
-    const c=readCache(),sn=window.PRICE_SNAPSHOT&&window.PRICE_SNAPSHOT.cur===CUR?window.PRICE_SNAPSHOT:null;
-    const cand=[c&&{...c,src:"cache"},sn&&{...sn,src:"snapshot"}].filter(Boolean).sort((a,b)=>b.ts-a.ts)[0];
-    if(cand&&Date.now()-cand.ts<TTL)return cand;
-    try{const d=await live();writeCache(d);return {...d,src:"live"}}
-    catch(e){
-      if(cand)return {...cand,stale:true,err:String(e.message||e)};
-      throw new Error((e.message||e)+" (кэша и prices.js нет)");
-    }
+    const sn=ok(window.PRICE_SNAPSHOT)?window.PRICE_SNAPSHOT:null,c=readCache();
+    const best=[sn&&{...sn,src:"snapshot"},c&&{...c,src:"cache"}].filter(Boolean).sort((a,b)=>b.ts-a.ts)[0];
+    if(!best)throw new Error("prices.js не найден или пуст, сохранённых цен нет");
+    if(best.src==="snapshot")writeCache(best);
+    best.stale=Date.now()-best.ts>STALE;
+    return best;
   }
   return {load};
 })();
@@ -210,7 +186,7 @@ async function load(){
   const errs=[];
   let P;
   try{P=await Prices.load()}catch(e){
-    $("#loadt").innerHTML="Не удалось получить цены скинов.<br><small style='color:var(--mut)'>"+esc(e.message||e)+"<br>Запусти <b>node update-prices.mjs</b> рядом с файлом, чтобы скачать prices.js.</small>";
+    $("#loadt").innerHTML="Не удалось получить цены скинов.<br><small style='color:var(--mut)'>"+esc(e.message||e)+"<br>Если это твой сайт на GitHub: вкладка Actions → Update prices → Run workflow.</small>";
     $("#retry").style.display="";return;
   }
   for(const u of urls){
